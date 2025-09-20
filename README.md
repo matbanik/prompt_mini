@@ -19,8 +19,8 @@ Prompt Mini is a desktop application for creating, managing, and refining AI pro
 
 ![Screenshot](./PMIN.jpg)
 ![Screenshot](./TAI.jpg)
-![Screenshot](./EDT.jpg.jpg)
-![Screenshot](./FILE.jpg.jpg)
+![Screenshot](./EDT.jpg)
+![Screenshot](./FILE.jpg)
 ---
 
 ## Building from Source
