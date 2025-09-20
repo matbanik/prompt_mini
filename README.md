@@ -2,7 +2,7 @@
 
 > A powerful, local-first desktop application for managing and refining your AI prompts.
 
-Prompt Mini is a desktop application for creating, managing, and refining AI prompts. Built with Python and Tkinter, it uses a local SQLite database with full-text search for fast access to your prompt library. It integrates directly with major AI APIs to help tune and improve prompts, and includes robust exporting options, backup/restore, and detailed prompt statistics.
+Prompt Mini is a desktop application for creating, managing, and refining AI prompts. Built with Python and Tkinter, it uses a local SQLite database with full-text search for fast access to your prompt library. It integrates directly with major AI APIs to help tune and improve prompts, and includes robust exporting options, backup/restore/import, and detailed prompt statistics.
 
 ---
 
@@ -27,16 +27,16 @@ Prompt Mini is a desktop application for creating, managing, and refining AI pro
 
 The application is built using a batch script that automates the setup process.
 
-1.  [cite_start]**Prerequisite**: Ensure you have Python installed and accessible from your system's PATH. [cite: 1]
+1.  **Prerequisite**: Ensure you have Python installed and accessible from your system's PATH. [cite: 1]
 2.  **Run the Build Script**: Execute `build.bat`.
 
 The script will perform the following actions:
-* [cite_start]Verify your Python installation. [cite: 1]
-* [cite_start]Install `PyInstaller` if it is not already present. [cite: 1, 2]
-* [cite_start]Install all required Python libraries, including `pandas`, `reportlab`, `python-docx`, `wordcloud`, `requests`, and `huggingface_hub`. [cite: 2]
-* [cite_start]Use PyInstaller to package the application into a single, standalone executable. [cite: 2]
+* Verify your Python installation.
+* Install `PyInstaller` if it is not already present.
+* Install all required Python libraries, including `pandas`, `reportlab`, `python-docx`, `wordcloud`, `requests`, and `huggingface_hub`.
+* Use PyInstaller to package the application into a single, standalone executable. 
 
-[cite_start]Upon successful completion, the executable will be located at `dist\PromptMini.exe`. [cite: 3]
+Upon successful completion, the executable will be located at `dist\PromptMini.exe`.
 
 ---
 
