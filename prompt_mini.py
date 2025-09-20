@@ -296,6 +296,7 @@ class PromptMiniApp:
         file_menu.add_separator()
         file_menu.add_command(label="Backup", command=self.backup_database)
         file_menu.add_command(label="Restore", command=self.restore_database)
+        file_menu.add_command(label="Import", command=self.import_database)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.root.quit)
         
@@ -405,6 +406,25 @@ class PromptMiniApp:
             self.status_bar.config(text=message)
             # Clear the message after 5 seconds
             self.root.after(5000, lambda: self.status_bar.config(text="Ready"))
+            
+    def sync_scroll(self, scrollbar, line_numbers, *args):
+        """Synchronize scrolling between main text and line numbers"""
+        # Update the scrollbar
+        scrollbar.set(*args)
+        
+        # Sync line numbers scrolling
+        if len(args) >= 2:
+            # Get the scroll position (top fraction)
+            top = float(args[0])
+            # Scroll line numbers to match
+            line_numbers.yview_moveto(top)
+            
+    def sync_scroll_command(self, main_text, line_numbers, *args):
+        """Handle scrollbar commands and sync both text widgets"""
+        # Apply scroll to main text
+        main_text.yview(*args)
+        # Apply same scroll to line numbers
+        line_numbers.yview(*args)
         
     def create_item_display(self, parent):
         """Create item display widgets"""
@@ -438,9 +458,19 @@ class PromptMiniApp:
                                    border=0, state='disabled', wrap='none')
         self.line_numbers.pack(fill=tk.Y, expand=True)
         
-        # Prompt text
-        self.prompt_display = scrolledtext.ScrolledText(prompt_frame, wrap=tk.WORD, state='disabled')
-        self.prompt_display.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+        # Prompt text with custom scrollbar
+        text_frame = ttk.Frame(prompt_frame)
+        text_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+        
+        self.prompt_display = tk.Text(text_frame, wrap=tk.WORD, state='disabled')
+        prompt_scrollbar = ttk.Scrollbar(text_frame, orient=tk.VERTICAL)
+        
+        # Configure synchronized scrolling
+        self.prompt_display.config(yscrollcommand=lambda *args: self.sync_scroll(prompt_scrollbar, self.line_numbers, *args))
+        prompt_scrollbar.config(command=lambda *args: self.sync_scroll_command(self.prompt_display, self.line_numbers, *args))
+        
+        self.prompt_display.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        prompt_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
         # Status bar
         status_frame = ttk.Frame(parent)
@@ -936,8 +966,19 @@ Examples:
                               border=0, state='disabled', wrap='none')
         line_numbers.pack(fill=tk.Y, expand=True)
         
-        # Prompt text
-        prompt_text = scrolledtext.ScrolledText(prompt_frame, wrap=tk.WORD)
+        # Prompt text with custom scrollbar
+        text_frame = ttk.Frame(prompt_frame)
+        text_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+        
+        prompt_text = tk.Text(text_frame, wrap=tk.WORD)
+        text_scrollbar = ttk.Scrollbar(text_frame, orient=tk.VERTICAL)
+        
+        # Configure synchronized scrolling
+        prompt_text.config(yscrollcommand=lambda *args: self.sync_scroll(text_scrollbar, line_numbers, *args))
+        text_scrollbar.config(command=lambda *args: self.sync_scroll_command(prompt_text, line_numbers, *args))
+        
+        prompt_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        text_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         prompt_text.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
         
         if data and data[3]:
@@ -1233,8 +1274,19 @@ Examples:
                                     border=0, state='disabled', wrap='none')
         input_line_numbers.pack(side=tk.LEFT, fill=tk.Y)
         
-        input_text = scrolledtext.ScrolledText(input_line_frame, wrap=tk.WORD)
-        input_text.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+        # Input text with custom scrollbar
+        input_text_frame = ttk.Frame(input_line_frame)
+        input_text_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+        
+        input_text = tk.Text(input_text_frame, wrap=tk.WORD)
+        input_scrollbar = ttk.Scrollbar(input_text_frame, orient=tk.VERTICAL)
+        
+        # Configure synchronized scrolling
+        input_text.config(yscrollcommand=lambda *args: self.sync_scroll(input_scrollbar, input_line_numbers, *args))
+        input_scrollbar.config(command=lambda *args: self.sync_scroll_command(input_text, input_line_numbers, *args))
+        
+        input_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        input_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
         # Set initial input text
         initial_input = f"Please help me improve this AI prompt:\n\n{text}"
@@ -1267,8 +1319,19 @@ Examples:
                                      border=0, state='disabled', wrap='none')
         output_line_numbers.pack(side=tk.LEFT, fill=tk.Y)
         
-        output_text = scrolledtext.ScrolledText(output_line_frame, wrap=tk.WORD, state='disabled')
-        output_text.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+        # Output text with custom scrollbar
+        output_text_frame = ttk.Frame(output_line_frame)
+        output_text_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+        
+        output_text = tk.Text(output_text_frame, wrap=tk.WORD, state='disabled')
+        output_scrollbar = ttk.Scrollbar(output_text_frame, orient=tk.VERTICAL)
+        
+        # Configure synchronized scrolling
+        output_text.config(yscrollcommand=lambda *args: self.sync_scroll(output_scrollbar, output_line_numbers, *args))
+        output_scrollbar.config(command=lambda *args: self.sync_scroll_command(output_text, output_line_numbers, *args))
+        
+        output_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        output_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
         # Output status bar
         output_status_frame = ttk.Frame(output_frame)
@@ -1801,6 +1864,192 @@ Examples:
             except Exception as e:
                 self.logger.error(f"Restore error: {e}")
                 messagebox.showerror("Restore Error", f"Restore failed: {e}")
+                
+    def import_database(self):
+        """Import records from backup file with new IDs"""
+        backup_file = filedialog.askopenfilename(
+            title="Select Backup File to Import",
+            filetypes=[("Backup files", "*.bck"), ("All files", "*.*")],
+            initialdir=self.settings['export_path']
+        )
+        
+        if not backup_file:
+            return
+            
+        try:
+            # Connect to the backup database
+            import_conn = sqlite3.connect(backup_file)
+            
+            # Get records from backup
+            cursor = import_conn.execute('''
+                SELECT Created, Modified, Purpose, Prompt, SessionURLs, Tags, Note
+                FROM prompts
+                ORDER BY id
+            ''')
+            import_records = cursor.fetchall()
+            import_conn.close()
+            
+            if not import_records:
+                messagebox.showinfo("No Data", "The backup file contains no records to import")
+                return
+            
+            # Analyze potential duplicates
+            duplicate_count = self.analyze_duplicates(import_records)
+            
+            # Show confirmation dialog with duplicate information
+            if self.show_import_confirmation(len(import_records), duplicate_count):
+                self.perform_import(import_records)
+                
+        except Exception as e:
+            self.logger.error(f"Import error: {e}")
+            messagebox.showerror("Import Error", f"Failed to read backup file: {e}")
+            
+    def analyze_duplicates(self, import_records):
+        """Analyze how many potential duplicates will be created"""
+        duplicate_count = 0
+        
+        try:
+            # Get existing records from current database
+            cursor = self.conn.execute('''
+                SELECT Purpose, Prompt, SessionURLs, Tags, Note
+                FROM prompts
+            ''')
+            existing_records = cursor.fetchall()
+            
+            # Convert to sets for comparison (excluding Created/Modified which will be different)
+            existing_set = set()
+            for record in existing_records:
+                # Create a comparable tuple (Purpose, Prompt, SessionURLs, Tags, Note)
+                comparable = (
+                    record[0] or '',  # Purpose
+                    record[1] or '',  # Prompt
+                    record[2] or '',  # SessionURLs
+                    record[3] or '',  # Tags
+                    record[4] or ''   # Note
+                )
+                existing_set.add(comparable)
+            
+            # Check import records against existing ones
+            for record in import_records:
+                # Skip Created/Modified (indices 0,1) and compare the rest
+                comparable = (
+                    record[2] or '',  # Purpose
+                    record[3] or '',  # Prompt
+                    record[4] or '',  # SessionURLs
+                    record[5] or '',  # Tags
+                    record[6] or ''   # Note
+                )
+                if comparable in existing_set:
+                    duplicate_count += 1
+                    
+        except Exception as e:
+            self.logger.error(f"Duplicate analysis error: {e}")
+            # If analysis fails, assume worst case
+            duplicate_count = len(import_records)
+            
+        return duplicate_count
+        
+    def show_import_confirmation(self, total_records, duplicate_count):
+        """Show import confirmation dialog with duplicate information"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Confirm Import")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.withdraw()  # Hide initially
+        
+        # Main message
+        main_frame = ttk.Frame(dialog)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        # Warning icon and title
+        title_frame = ttk.Frame(main_frame)
+        title_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        ttk.Label(title_frame, text="⚠️", font=('TkDefaultFont', 16)).pack(side=tk.LEFT)
+        ttk.Label(title_frame, text="Import Confirmation", 
+                 font=('TkDefaultFont', 12, 'bold')).pack(side=tk.LEFT, padx=(10, 0))
+        
+        # Import details
+        details_frame = ttk.LabelFrame(main_frame, text="Import Details")
+        details_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        ttk.Label(details_frame, text=f"Records to import: {total_records}").pack(anchor=tk.W, padx=10, pady=5)
+        ttk.Label(details_frame, text=f"Potential duplicates: {duplicate_count}").pack(anchor=tk.W, padx=10, pady=5)
+        ttk.Label(details_frame, text=f"New unique records: {total_records - duplicate_count}").pack(anchor=tk.W, padx=10, pady=5)
+        
+        # Warning message
+        warning_frame = ttk.LabelFrame(main_frame, text="Warning")
+        warning_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        warning_text = """This import will add all records from the backup file with new IDs.
+        
+If there are potential duplicates, you will have multiple copies of the same content in your database.
+        
+All imported records will have new creation and modification timestamps.
+        
+This action cannot be undone automatically."""
+        
+        ttk.Label(warning_frame, text=warning_text, wraplength=400, justify=tk.LEFT).pack(padx=10, pady=10)
+        
+        # Result variable
+        result = {'confirmed': False}
+        
+        # Buttons
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(fill=tk.X, pady=(15, 0))
+        
+        def confirm_import():
+            result['confirmed'] = True
+            dialog.destroy()
+            
+        def cancel_import():
+            result['confirmed'] = False
+            dialog.destroy()
+        
+        ttk.Button(btn_frame, text="Cancel", command=cancel_import).pack(side=tk.RIGHT, padx=(5, 0))
+        ttk.Button(btn_frame, text="Import Anyway", command=confirm_import).pack(side=tk.RIGHT)
+        
+        # Auto-size and show dialog
+        self.root.after(10, lambda: self.auto_size_window(dialog, 500, 400, True))
+        
+        # Wait for dialog to close
+        dialog.wait_window()
+        
+        return result['confirmed']
+        
+    def perform_import(self, import_records):
+        """Perform the actual import of records"""
+        try:
+            imported_count = 0
+            current_time = datetime.now().isoformat()
+            
+            for record in import_records:
+                # Skip original Created/Modified, use current timestamp
+                _, _, purpose, prompt, session_urls, tags, note = record
+                
+                # Insert with new ID and current timestamps
+                self.conn.execute('''
+                    INSERT INTO prompts (Created, Modified, Purpose, Prompt, SessionURLs, Tags, Note)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (current_time, current_time, purpose, prompt, session_urls, tags, note))
+                
+                imported_count += 1
+            
+            self.conn.commit()
+            
+            # Refresh the view
+            self.perform_search()
+            
+            # Show success message
+            self.update_status_bar(f"Successfully imported {imported_count} records")
+            messagebox.showinfo("Import Complete", 
+                              f"Successfully imported {imported_count} records with new IDs")
+            self.logger.info(f"Imported {imported_count} records from backup")
+            
+        except Exception as e:
+            self.conn.rollback()
+            self.logger.error(f"Import execution error: {e}")
+            messagebox.showerror("Import Error", f"Import failed: {e}")
                 
     def show_console_log(self):
         """Show console log window"""
