@@ -27,7 +27,7 @@ pip install pandas reportlab python-docx wordcloud requests huggingface_hub
 
 REM Create executable with PyInstaller
 echo Creating executable...
-pyinstaller --onefile --windowed --name "PromptMini" --exclude-module pytest prompt_mini.py
+pyinstaller --onedir --windowed --name "PromptMini" --exclude-module pytest prompt_mini.py
 
 if errorlevel 1 (
     echo Error: Failed to create executable
