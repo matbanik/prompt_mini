@@ -13,6 +13,7 @@ from collections import Counter
 import shutil
 from pathlib import Path
 import sys
+from contextlib import contextmanager
 
 # Import AI APIs
 from ai_apis import AIManager
@@ -48,13 +49,16 @@ class PromptMiniApp:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("Prompt Mini")
-        self.root.geometry("1200x800")
+        
+        # Load settings first to get window geometry
+        self.settings = self.load_settings()
+        
+        # Set window geometry from settings
+        window_geometry = self.settings.get('window_geometry', '1200x800+100+100')
+        self.root.geometry(window_geometry)
         
         # Initialize logging
         self.setup_logging()
-        
-        # Load settings
-        self.settings = self.load_settings()
         
         # Apply log level from settings
         self.apply_log_level()
@@ -70,13 +74,25 @@ class PromptMiniApp:
         self.selected_items = []
         self.current_item = None
         
+        # In-place editing state
+        self.editing_mode = False
+        self.editing_widgets = {}
+        self.original_widgets = {}
+        
         # Sorting state tracking
         self.sort_column = None
         self.sort_direction = None  # None, 'asc', 'desc'
         
+        # Cache for frequently accessed prompts
+        self.prompt_cache = {}
+        self.logger.info("Initialized prompt cache")
+        
         # Create UI
         self.create_menu()
         self.create_main_ui()
+        
+        # Bind window close event to save geometry
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         
         # Load initial data
         self.perform_search()
@@ -133,7 +149,8 @@ class PromptMiniApp:
             'export_path': str(Path.home() / 'Downloads'),
             'ai_provider': 'OpenAI',
             'ai_api_key': '',
-            'log_level': 'INFO'
+            'log_level': 'INFO',
+            'window_geometry': '1200x800+100+100'  # Default window size and position
         }
         self.save_settings(default_settings)
         return default_settings
@@ -193,9 +210,26 @@ class PromptMiniApp:
         
         return final_width, final_height
             
+    @contextmanager
+    def get_db_connection(self):
+        """Get database connection with proper context management"""
+        conn = None
+        try:
+            conn = sqlite3.connect('prompt_mini.db', timeout=10.0, check_same_thread=False)
+            conn.execute('PRAGMA foreign_keys = ON')
+            yield conn
+        except Exception as e:
+            if conn:
+                conn.rollback()
+            raise e
+        finally:
+            if conn:
+                conn.close()
+
     def init_database(self):
         """Initialize SQLite database with FTS5"""
         try:
+            # Initialize the main connection for compatibility
             self.conn = sqlite3.connect('prompt_mini.db', check_same_thread=False)
             self.conn.execute('PRAGMA foreign_keys = ON')
             
@@ -330,13 +364,22 @@ class PromptMiniApp:
         search_btn = ttk.Button(search_frame, text="Search", command=self.perform_search)
         search_btn.pack(side=tk.RIGHT, padx=(5, 0))
         
-        # Main content area
+        # Main content area with resizable panels
         main_frame = ttk.Frame(self.root)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         
-        # Left panel (67%) - Search View
-        left_frame = ttk.Frame(main_frame)
-        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # Create PanedWindow for resizable split with better configuration
+        try:
+            # Try with sashwidth (newer Tkinter versions)
+            self.paned_window = ttk.PanedWindow(main_frame, orient=tk.HORIZONTAL, sashwidth=8, sashrelief=tk.RAISED)
+        except tk.TclError:
+            # Fallback for older Tkinter versions
+            self.paned_window = ttk.PanedWindow(main_frame, orient=tk.HORIZONTAL)
+        self.paned_window.pack(fill=tk.BOTH, expand=True)
+        
+        # Left panel (70%) - Search View (increased to show Tags column fully)
+        left_frame = ttk.Frame(self.paned_window)
+        self.paned_window.add(left_frame, weight=7)  # 70% weight
         
         # Treeview for search results
         columns = ('ID', 'Created', 'Modified', 'Purpose', 'Tags')
@@ -349,11 +392,12 @@ class PromptMiniApp:
         self.tree.heading('Purpose', text='Purpose', command=lambda: self.sort_by_column('Purpose'))
         self.tree.heading('Tags', text='Tags', command=lambda: self.sort_by_column('Tags'))
         
-        self.tree.column('ID', width=50, minwidth=50, stretch=False)
-        self.tree.column('Created', width=160, minwidth=160, stretch=False)
-        self.tree.column('Modified', width=160, minwidth=160, stretch=False)
-        self.tree.column('Purpose', width=200)
-        self.tree.column('Tags', width=150)
+        # Configure columns with better sizing - ensure Tags is fully visible
+        self.tree.column('ID', width=40, minwidth=30, stretch=False)
+        self.tree.column('Created', width=120, minwidth=100, stretch=False)
+        self.tree.column('Modified', width=120, minwidth=100, stretch=False)
+        self.tree.column('Purpose', width=200, minwidth=120)  # Increased to give more space
+        self.tree.column('Tags', width=150, minwidth=100)  # Increased to ensure full visibility
         
         # Scrollbar for treeview
         tree_scroll = ttk.Scrollbar(left_frame, orient=tk.VERTICAL, command=self.tree.yview)
@@ -365,29 +409,38 @@ class PromptMiniApp:
         # Bind events
         self.tree.bind('<<TreeviewSelect>>', self.on_tree_select)
         self.tree.bind('<Double-1>', self.on_tree_double_click)
+        self.tree.bind('<Motion>', self.on_tree_motion)
+        self.tree.bind('<Leave>', self.on_tree_leave)
         
-        # Right panel (33%) - Item Display
-        right_frame = ttk.Frame(main_frame)
-        right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, padx=(10, 0))
+        # Add global undo/redo support
+        self.root.bind('<Control-z>', self.undo_text)
+        self.root.bind('<Control-y>', self.redo_text)
         
-        # Action buttons
+        # Tooltip for treeview
+        self.tooltip = None
+        
+        # Right panel (30%) - Item Display (reduced to give more space to left panel)
+        right_frame = ttk.Frame(self.paned_window)
+        self.paned_window.add(right_frame, weight=3)  # 30% weight
+        
+        # Action buttons - reorganized for better UX
         btn_frame = ttk.Frame(right_frame)
         btn_frame.pack(fill=tk.X, pady=(0, 10))
         
-        self.duplicate_btn = ttk.Button(btn_frame, text="Duplicate", command=self.duplicate_item)
-        self.duplicate_btn.pack(side=tk.LEFT, padx=(0, 5))
-        
+        # Primary action first - New Prompt
         self.new_btn = ttk.Button(btn_frame, text="New Prompt", command=self.new_item)
-        self.new_btn.pack(side=tk.LEFT, padx=5)
+        self.new_btn.pack(side=tk.LEFT, padx=(0, 5))
         
-        self.delete_btn = ttk.Button(btn_frame, text="Delete", command=self.delete_items)
-        self.delete_btn.pack(side=tk.LEFT, padx=5)
+        # Group related actions: Duplicate, Change
+        self.duplicate_btn = ttk.Button(btn_frame, text="Duplicate", command=self.duplicate_item)
+        self.duplicate_btn.pack(side=tk.LEFT, padx=5)
         
         self.change_btn = ttk.Button(btn_frame, text="Change", command=self.change_item)
         self.change_btn.pack(side=tk.LEFT, padx=5)
         
-        self.tune_btn = ttk.Button(btn_frame, text="Tune with AI", command=self.tune_with_ai)
-        self.tune_btn.pack(side=tk.LEFT, padx=(5, 0))
+        # Isolate destructive action - Delete with more padding
+        self.delete_btn = ttk.Button(btn_frame, text="Delete", command=self.delete_items)
+        self.delete_btn.pack(side=tk.LEFT, padx=(20, 0))  # More padding to isolate
         
         # Item display area
         display_frame = ttk.Frame(right_frame)
@@ -462,7 +515,7 @@ class PromptMiniApp:
         text_frame = ttk.Frame(prompt_frame)
         text_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
         
-        self.prompt_display = tk.Text(text_frame, wrap=tk.WORD, state='disabled')
+        self.prompt_display = tk.Text(text_frame, wrap=tk.WORD, state='disabled', undo=True, maxundo=50)
         prompt_scrollbar = ttk.Scrollbar(text_frame, orient=tk.VERTICAL)
         
         # Configure synchronized scrolling
@@ -479,67 +532,99 @@ class PromptMiniApp:
         self.status_label = ttk.Label(status_frame, text="Char: 0 | Word: 0 | Sentence: 0 | Line: 0 | Tokens: 0")
         self.status_label.pack(side=tk.LEFT)
         
+        # Consolidated controls - only Copy and Tune with AI below prompt text
         copy_btn = ttk.Button(status_frame, text="Copy", command=self.copy_to_clipboard)
         copy_btn.pack(side=tk.RIGHT, padx=(5, 0))
         
         tune_btn = ttk.Button(status_frame, text="Tune with AI", command=self.tune_with_ai)
         tune_btn.pack(side=tk.RIGHT)
         
-        # Session URLs
-        urls_frame = ttk.LabelFrame(parent, text="Session URLs")
-        urls_frame.pack(fill=tk.X, pady=(0, 5))
+        # Session URLs - cleaner design
+        urls_label = ttk.Label(parent, text="Session URLs", font=('TkDefaultFont', 9, 'bold'))
+        urls_label.pack(anchor=tk.W, pady=(0, 2))
         
-        self.urls_display = scrolledtext.ScrolledText(urls_frame, height=3, state='disabled')
-        self.urls_display.pack(fill=tk.X, padx=5, pady=5)
+        self.urls_display = scrolledtext.ScrolledText(parent, height=7, state='disabled', undo=True, maxundo=50)  # Increased by 4 lines
+        self.urls_display.pack(fill=tk.X, pady=(0, 5))
         
-        # Tags
-        tags_frame = ttk.LabelFrame(parent, text="Tags")
-        tags_frame.pack(fill=tk.X, pady=(0, 5))
+        # Tags - cleaner design
+        tags_label = ttk.Label(parent, text="Tags", font=('TkDefaultFont', 9, 'bold'))
+        tags_label.pack(anchor=tk.W, pady=(0, 2))
         
-        self.tags_display = ttk.Frame(tags_frame)
-        self.tags_display.pack(fill=tk.X, padx=5, pady=5)
+        self.tags_display = ttk.Frame(parent)
+        self.tags_display.pack(fill=tk.X, pady=(0, 5))
         
-        # Note
-        note_frame = ttk.LabelFrame(parent, text="Note")
-        note_frame.pack(fill=tk.BOTH, pady=(0, 5))
+        # Note - cleaner design
+        note_label = ttk.Label(parent, text="Note", font=('TkDefaultFont', 9, 'bold'))
+        note_label.pack(anchor=tk.W, pady=(0, 2))
         
-        self.note_display = scrolledtext.ScrolledText(note_frame, height=7, state='disabled')
-        self.note_display.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)       
+        self.note_display = scrolledtext.ScrolledText(parent, height=0, state='disabled', undo=True, maxundo=50)  # Reduced by 7 lines (from 7 to 0, will auto-size)
+        self.note_display.pack(fill=tk.BOTH, expand=True, pady=(0, 5))       
  
     def on_search_change(self, *args):
-        """Handle search input changes with debounce"""
-        if self.search_debounce_timer:
+        """Handle search input changes with improved debounce"""
+        if hasattr(self, 'search_debounce_timer') and self.search_debounce_timer:
             self.root.after_cancel(self.search_debounce_timer)
-        self.search_debounce_timer = self.root.after(300, self.perform_search)
+        
+        # Configurable debounce delay
+        delay = 300  # milliseconds
+        self.search_debounce_timer = self.root.after(delay, self.perform_search)
         
     def perform_search(self):
-        """Perform search using FTS5"""
+        """Perform search using FTS5 with threading optimization"""
         search_term = self.search_var.get().strip()
         
-        try:
-            if search_term:
-                # Use FTS5 search
-                cursor = self.conn.execute('''
-                    SELECT p.id, p.Created, p.Modified, p.Purpose, p.Prompt, p.SessionURLs, p.Tags, p.Note
-                    FROM prompts p
-                    JOIN prompts_fts fts ON p.id = fts.rowid
-                    WHERE prompts_fts MATCH ?
-                    ORDER BY p.Modified DESC
-                ''', (search_term,))
-            else:
-                # Show all records
-                cursor = self.conn.execute('''
-                    SELECT id, Created, Modified, Purpose, Prompt, SessionURLs, Tags, Note
-                    FROM prompts
-                    ORDER BY Modified DESC
-                ''')
+        # Show loading indicator
+        if hasattr(self, 'status_bar'):
+            self.status_bar.config(text="Searching...")
+            self.root.config(cursor="wait")
+            self.root.update_idletasks()
+        
+        def search_worker():
+            try:
+                with self.get_db_connection() as conn:
+                    if search_term:
+                        # Use FTS5 search
+                        cursor = conn.execute('''
+                            SELECT p.id, p.Created, p.Modified, p.Purpose, p.Prompt, p.SessionURLs, p.Tags, p.Note
+                            FROM prompts p
+                            JOIN prompts_fts fts ON p.id = fts.rowid
+                            WHERE prompts_fts MATCH ?
+                            ORDER BY p.Modified DESC
+                        ''', (search_term,))
+                    else:
+                        # Show all records
+                        cursor = conn.execute('''
+                            SELECT id, Created, Modified, Purpose, Prompt, SessionURLs, Tags, Note
+                            FROM prompts
+                            ORDER BY Modified DESC
+                        ''')
+                    
+                    results = cursor.fetchall()
                 
-            self.search_results = cursor.fetchall()
-            self.refresh_search_view()
-            
-        except Exception as e:
-            self.logger.error(f"Search error: {e}")
-            messagebox.showerror("Search Error", f"Search failed: {e}")
+                # Update UI on main thread
+                self.root.after(0, lambda r=results: self._handle_search_results(r, None))
+                
+            except Exception as e:
+                self.logger.error(f"Search error: {e}")
+                self.root.after(0, lambda err=e: self._handle_search_results([], err))
+        
+        # Run search in background thread for better UI responsiveness
+        thread = threading.Thread(target=search_worker, daemon=True)
+        thread.start()
+    
+    def _handle_search_results(self, results, error):
+        """Handle search results on main thread"""
+        # Hide loading indicator
+        if hasattr(self, 'status_bar'):
+            self.status_bar.config(text="Ready")
+            self.root.config(cursor="")
+        
+        if error:
+            messagebox.showerror("Search Error", f"Search failed: {error}")
+            return
+        
+        self.search_results = results
+        self.refresh_search_view()
             
     def sort_by_column(self, column):
         """Sort the treeview by the specified column"""
@@ -650,21 +735,21 @@ class PromptMiniApp:
         if len(self.selected_items) == 1:
             self.current_item = self.selected_items[0]
             self.update_item_display()
-            self.delete_btn.config(text="Delete")
-            self.duplicate_btn.config(state='normal')
-            self.change_btn.config(state='normal')
-            self.tune_btn.config(state='normal')
+            if not self.editing_mode:
+                self.delete_btn.config(text="Delete")
+                self.duplicate_btn.config(state='normal')
+                self.change_btn.config(state='normal')
         elif len(self.selected_items) > 1:
-            self.delete_btn.config(text=f"Delete ({len(self.selected_items)})")
-            self.duplicate_btn.config(state='disabled')
-            self.change_btn.config(state='disabled')
-            self.tune_btn.config(state='disabled')
+            if not self.editing_mode:
+                self.delete_btn.config(text=f"Delete ({len(self.selected_items)})")
+                self.duplicate_btn.config(state='disabled')
+                self.change_btn.config(state='disabled')
             self.clear_item_display()
         else:
-            self.delete_btn.config(text="Delete")
-            self.duplicate_btn.config(state='disabled')
-            self.change_btn.config(state='disabled')
-            self.tune_btn.config(state='disabled')
+            if not self.editing_mode:
+                self.delete_btn.config(text="Delete")
+                self.duplicate_btn.config(state='disabled')
+                self.change_btn.config(state='disabled')
             self.clear_item_display()
             
     def on_tree_double_click(self, event):
@@ -672,21 +757,146 @@ class PromptMiniApp:
         if self.current_item:
             self.change_item()
             
-    def update_item_display(self):
-        """Update the item display panel"""
+    def on_tree_motion(self, event):
+        """Handle mouse motion over treeview for tooltips"""
+        # Get the item under the cursor
+        item = self.tree.identify_row(event.y)
+        column = self.tree.identify_column(event.x)
+        
+        if item and column:
+            # Get column index (column is like '#1', '#2', etc.)
+            col_index = int(column[1:]) - 1
+            column_names = ['ID', 'Created', 'Modified', 'Purpose', 'Tags']
+            
+            if col_index < len(column_names):
+                col_name = column_names[col_index]
+                
+                # Show tooltip for Purpose and Tags columns
+                if col_name in ['Purpose', 'Tags']:
+                    # Get the full text from search results
+                    item_values = self.tree.item(item)['values']
+                    if item_values and col_index < len(item_values):
+                        display_text = item_values[col_index]
+                        
+                        # Get the full text from search results
+                        full_text = self.get_full_text_for_tooltip(item, col_name)
+                        
+                        # Show tooltip if text is truncated
+                        if full_text and len(full_text) > len(display_text):
+                            self.show_tooltip(event.x_root, event.y_root, full_text)
+                        else:
+                            self.hide_tooltip()
+                    else:
+                        self.hide_tooltip()
+                else:
+                    self.hide_tooltip()
+            else:
+                self.hide_tooltip()
+        else:
+            self.hide_tooltip()
+            
+    def on_tree_leave(self, event):
+        """Handle mouse leaving treeview"""
+        self.hide_tooltip()
+        
+    def get_full_text_for_tooltip(self, item, column_name):
+        """Get full text for tooltip from search results"""
+        try:
+            item_values = self.tree.item(item)['values']
+            if not item_values:
+                return ""
+                
+            item_id = item_values[0]  # ID is first column
+            
+            # Find the item in search results
+            if hasattr(self, 'search_results'):
+                for row in self.search_results:
+                    if str(row[0]) == str(item_id):  # Compare IDs
+                        if column_name == 'Purpose':
+                            return row[3] or ""  # Purpose is at index 3
+                        elif column_name == 'Tags':
+                            return row[6] or ""  # Tags is at index 6
+            return ""
+        except Exception as e:
+            self.logger.error(f"Error getting tooltip text: {e}")
+            return ""
+            
+    def show_tooltip(self, x, y, text):
+        """Show tooltip window"""
+        if self.tooltip:
+            self.tooltip.destroy()
+            
+        self.tooltip = tk.Toplevel(self.root)
+        self.tooltip.wm_overrideredirect(True)
+        self.tooltip.wm_geometry(f"+{x+10}+{y+10}")
+        
+        # Create tooltip content
+        frame = ttk.Frame(self.tooltip, relief=tk.SOLID, borderwidth=1)
+        frame.pack()
+        
+        label = ttk.Label(frame, text=text, background="lightyellow", 
+                         foreground="black", wraplength=300, justify=tk.LEFT)
+        label.pack(padx=5, pady=5)
+        
+    def hide_tooltip(self):
+        """Hide tooltip window"""
+        if self.tooltip:
+            self.tooltip.destroy()
+            self.tooltip = None
+            
+    def undo_text(self, event):
+        """Handle Ctrl+Z for undo"""
+        # Find the focused text widget
+        focused = self.root.focus_get()
+        if isinstance(focused, tk.Text):
+            try:
+                focused.edit_undo()
+            except tk.TclError:
+                pass  # No undo available
+        return "break"
+        
+    def redo_text(self, event):
+        """Handle Ctrl+Y for redo"""
+        # Find the focused text widget
+        focused = self.root.focus_get()
+        if isinstance(focused, tk.Text):
+            try:
+                focused.edit_redo()
+            except tk.TclError:
+                pass  # No redo available
+        return "break"
+            
+    def update_item_display(self, force_refresh=False):
+        """Update the item display panel with caching optimization"""
         if not self.current_item:
             return
-            
+        
         try:
-            cursor = self.conn.execute('''
-                SELECT Created, Modified, Purpose, Prompt, SessionURLs, Tags, Note
-                FROM prompts WHERE id = ?
-            ''', (self.current_item,))
-            
-            row = cursor.fetchone()
-            if not row:
-                return
-                
+            # Check cache first (unless force refresh is requested)
+            if not force_refresh and self.current_item in self.prompt_cache:
+                row = self.prompt_cache[self.current_item]
+                self.logger.debug(f"Using cached data for item {self.current_item}")
+            else:
+                # Fetch fresh data from database
+                with self.get_db_connection() as conn:
+                    cursor = conn.execute('''
+                        SELECT Created, Modified, Purpose, Prompt, SessionURLs, Tags, Note
+                        FROM prompts WHERE id = ?
+                    ''', (self.current_item,))
+                    
+                    row = cursor.fetchone()
+                    if not row:
+                        return
+                    
+                    # Cache the result (limit cache size)
+                    if len(self.prompt_cache) > 50:  # Simple cache size limit
+                        # Remove oldest entry
+                        oldest_key = next(iter(self.prompt_cache))
+                        del self.prompt_cache[oldest_key]
+                    
+                    self.prompt_cache[self.current_item] = row
+                    self.logger.debug(f"Fetched and cached fresh data for item {self.current_item}")
+                    
             created, modified, purpose, prompt, session_urls, tags, note = row
             
             # Update date labels
@@ -875,9 +1085,9 @@ Examples:
             self.open_prompt_window('duplicate', self.current_item)
             
     def change_item(self):
-        """Change selected item"""
-        if self.current_item:
-            self.open_prompt_window('change', self.current_item)
+        """Change selected item - now uses in-place editing"""
+        if self.current_item and not self.editing_mode:
+            self.enter_editing_mode()
             
     def delete_items(self):
         """Delete selected items"""
@@ -889,8 +1099,17 @@ Examples:
             try:
                 for item_id in self.selected_items:
                     self.conn.execute('DELETE FROM prompts WHERE id = ?', (item_id,))
+                    # CRITICAL FIX: Clear cache for deleted items
+                    self.clear_prompt_cache(item_id)
+                    
                 self.conn.commit()
                 self.perform_search()
+                
+                # Clear the item display if we deleted the currently selected item
+                if self.current_item in self.selected_items:
+                    self.current_item = None
+                    self.clear_item_display()
+                
                 self.logger.info(f"Deleted {count} items")
             except Exception as e:
                 self.logger.error(f"Delete error: {e}")
@@ -900,6 +1119,165 @@ Examples:
         """Open AI tuning window"""
         if self.current_item:
             self.open_ai_tuning_window(self.current_item)
+            
+    def enter_editing_mode(self):
+        """Enter in-place editing mode"""
+        if not self.current_item or self.editing_mode:
+            return
+            
+        try:
+            # Get current data
+            with self.get_db_connection() as conn:
+                cursor = conn.execute('''
+                    SELECT Created, Modified, Purpose, Prompt, SessionURLs, Tags, Note
+                    FROM prompts WHERE id = ?
+                ''', (self.current_item,))
+                row = cursor.fetchone()
+                if not row:
+                    return
+                    
+            created, modified, purpose, prompt, session_urls, tags, note = row
+            
+            # Make text widgets editable
+            self.prompt_display.config(state='normal')
+            self.urls_display.config(state='normal')
+            self.note_display.config(state='normal')
+            
+            # Replace tags buttons with editable entry
+            for widget in self.tags_display.winfo_children():
+                widget.destroy()
+            
+            self.tags_entry = ttk.Entry(self.tags_display)
+            self.tags_entry.pack(fill=tk.X, pady=(0, 5))
+            
+            # Populate with current tags
+            if tags:
+                try:
+                    tag_list = json.loads(tags) if tags.startswith('[') else tags.split(',')
+                    self.tags_entry.insert(0, ', '.join(tag_list))
+                except:
+                    self.tags_entry.insert(0, tags)
+            
+            # Replace action buttons with Save/Cancel
+            self.replace_action_buttons()
+            
+            # Set editing mode
+            self.editing_mode = True
+            
+        except Exception as e:
+            self.logger.error(f"Error entering editing mode: {e}")
+            messagebox.showerror("Edit Error", f"Failed to enter editing mode: {e}")
+            
+    def replace_action_buttons(self):
+        """Replace action buttons with Save/Cancel during editing"""
+        # Destroy existing buttons
+        for widget in self.new_btn.master.winfo_children():
+            if isinstance(widget, ttk.Button):
+                widget.destroy()
+                
+        # Create Save and Cancel buttons
+        self.save_btn = ttk.Button(self.new_btn.master, text="Save", command=self.save_edits)
+        self.save_btn.pack(side=tk.LEFT, padx=(0, 5))
+        
+        self.cancel_btn = ttk.Button(self.new_btn.master, text="Cancel", command=self.cancel_edits)
+        self.cancel_btn.pack(side=tk.LEFT, padx=5)
+        
+    def save_edits(self):
+        """Save edits and exit editing mode"""
+        try:
+            # Get edited values from current widgets
+            purpose = self.purpose_display.cget('text')  # Purpose is a label, not editable in this simplified version
+            prompt = self.prompt_display.get(1.0, tk.END).strip()
+            session_urls = self.urls_display.get(1.0, tk.END).strip()
+            
+            # Get tags from the tags entry field
+            tags = self.tags_entry.get() if hasattr(self, 'tags_entry') else ""
+            
+            note = self.note_display.get(1.0, tk.END).strip()
+            
+            # Process tags
+            if tags:
+                tag_list = [tag.strip() for tag in tags.split(',') if tag.strip()]
+                tags_json = json.dumps(tag_list)
+            else:
+                tags_json = None
+                
+            # Update database
+            now = datetime.now().isoformat()
+            with self.get_db_connection() as conn:
+                conn.execute('''
+                    UPDATE prompts 
+                    SET Modified = ?, Purpose = ?, Prompt = ?, SessionURLs = ?, Tags = ?, Note = ?
+                    WHERE id = ?
+                ''', (now, purpose, prompt, session_urls, tags_json, note, self.current_item))
+                conn.commit()
+                
+            # Clear cache for updated item
+            if hasattr(self, 'prompt_cache') and self.current_item in self.prompt_cache:
+                del self.prompt_cache[self.current_item]
+                
+            # Exit editing mode
+            self.exit_editing_mode()
+            
+            # Refresh display
+            self.update_item_display(force_refresh=True)
+            self.perform_search()
+            
+            self.logger.info(f"Saved edits for item {self.current_item}")
+            
+        except Exception as e:
+            self.logger.error(f"Error saving edits: {e}")
+            messagebox.showerror("Save Error", f"Failed to save edits: {e}")
+            
+    def cancel_edits(self):
+        """Cancel edits and exit editing mode"""
+        self.exit_editing_mode()
+        self.update_item_display(force_refresh=True)
+        
+    def exit_editing_mode(self):
+        """Exit editing mode and restore original widgets"""
+        if not self.editing_mode:
+            return
+            
+        try:
+            # Make text widgets read-only again
+            self.prompt_display.config(state='disabled')
+            self.urls_display.config(state='disabled')
+            self.note_display.config(state='disabled')
+            
+            # Restore tags display (destroy entry and recreate buttons)
+            if hasattr(self, 'tags_entry'):
+                self.tags_entry.destroy()
+                delattr(self, 'tags_entry')
+            
+            # Restore action buttons
+            self.restore_action_buttons()
+            
+            # Clear editing state
+            self.editing_mode = False
+            
+        except Exception as e:
+            self.logger.error(f"Error exiting editing mode: {e}")
+            
+    def restore_action_buttons(self):
+        """Restore original action buttons"""
+        # Destroy current buttons
+        for widget in self.save_btn.master.winfo_children():
+            if isinstance(widget, ttk.Button):
+                widget.destroy()
+                
+        # Recreate original buttons
+        self.new_btn = ttk.Button(self.save_btn.master, text="New Prompt", command=self.new_item)
+        self.new_btn.pack(side=tk.LEFT, padx=(0, 5))
+        
+        self.duplicate_btn = ttk.Button(self.save_btn.master, text="Duplicate", command=self.duplicate_item)
+        self.duplicate_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.change_btn = ttk.Button(self.save_btn.master, text="Change", command=self.change_item)
+        self.change_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.delete_btn = ttk.Button(self.save_btn.master, text="Delete", command=self.delete_items)
+        self.delete_btn.pack(side=tk.LEFT, padx=(20, 0))
             
     def open_prompt_window(self, mode, item_id=None):
         """Open prompt editing window"""
@@ -1170,14 +1548,44 @@ Examples:
                     WHERE id = ?
                 ''', (now, purpose, prompt, session_urls, tags_json, note, item_id))
                 
+                # CRITICAL FIX: Invalidate cache for the updated item
+                if hasattr(self, 'prompt_cache') and item_id in self.prompt_cache:
+                    del self.prompt_cache[item_id]
+                    self.logger.info(f"Cache invalidated for item {item_id}")
+                
             self.conn.commit()
             window.destroy()
+            
+            # Refresh search results
             self.perform_search()
+            
+            # CRITICAL FIX: If we're editing the currently selected item, refresh the display
+            if mode == 'change' and item_id == self.current_item:
+                # Force refresh of the item display by calling update_item_display with force_refresh=True
+                # This will fetch fresh data from the database and bypass the cache
+                self.update_item_display(force_refresh=True)
+                self.logger.info(f"Refreshed display for current item {item_id}")
+            
             self.logger.info(f"Saved prompt ({mode})")
             
         except Exception as e:
             self.logger.error(f"Save error: {e}")
             messagebox.showerror("Save Error", f"Failed to save: {e}")
+    
+    def clear_prompt_cache(self, item_id=None):
+        """Clear prompt cache for specific item or all items"""
+        if not hasattr(self, 'prompt_cache'):
+            return
+            
+        if item_id:
+            # Clear specific item from cache
+            if item_id in self.prompt_cache:
+                del self.prompt_cache[item_id]
+                self.logger.info(f"Cleared cache for item {item_id}")
+        else:
+            # Clear entire cache
+            self.prompt_cache.clear()
+            self.logger.info("Cleared entire prompt cache")
             
     def open_ai_tuning_window(self, item_id):
         """Open AI tuning window for existing item"""
@@ -2116,6 +2524,22 @@ This action cannot be undone automatically."""
         # Auto-size window after content is created and show it
         self.root.after(10, lambda: self.auto_size_window(log_window, 800, 600, True))
         
+    def on_closing(self):
+        """Handle application closing - save window geometry"""
+        try:
+            # Save current window geometry
+            geometry = self.root.geometry()
+            self.settings['window_geometry'] = geometry
+            self.save_settings()
+            self.logger.info(f"Saved window geometry: {geometry}")
+        except Exception as e:
+            self.logger.error(f"Error saving window geometry: {e}")
+        finally:
+            # Close database connection and destroy window
+            if hasattr(self, 'conn'):
+                self.conn.close()
+            self.root.destroy()
+    
     def run(self):
         """Run the application"""
         try:
