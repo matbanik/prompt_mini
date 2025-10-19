@@ -131,6 +131,8 @@ class PromptMiniApp:
         self.current_item: Optional[int] = None
         
         self.editing_mode: bool = False
+        self.has_unsaved_changes: bool = False
+        self.original_data: Optional[Dict] = None
         
         self.sort_column: Optional[str] = None
         self.sort_direction: Optional[str] = None
@@ -391,6 +393,7 @@ class PromptMiniApp:
         self.new_btn = ttk.Button(self.btn_frame, text="New Prompt", command=self.new_item)
         self.duplicate_btn = ttk.Button(self.btn_frame, text="Duplicate", command=self.duplicate_item)
         self.change_btn = ttk.Button(self.btn_frame, text="Change", command=self.change_item)
+        self.in_window_btn = ttk.Button(self.btn_frame, text="in Window", command=self.change_item_in_window)
         self.delete_btn = ttk.Button(self.btn_frame, text="Delete", command=self.delete_items)
 
         self.save_btn = ttk.Button(self.btn_frame, text="Save", command=self.save_edits)
@@ -406,11 +409,19 @@ class PromptMiniApp:
         self.status_bar = ttk.Label(self.root, text="Ready", relief=tk.SUNKEN, anchor=tk.W)
         self.status_bar.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=2)
         
-    def update_status_bar(self, message: str) -> None:
-        """Update the status bar with a temporary message."""
+    def update_status_bar(self, message: str = None) -> None:
+        """Update the status bar with a message or unsaved changes indicator."""
         if hasattr(self, 'status_bar'):
-            self.status_bar.config(text=message)
-            self.root.after(5000, lambda: self.status_bar.config(text="Ready"))
+            if message:
+                self.status_bar.config(text=message, font=('TkDefaultFont', 9, 'normal'))
+                if not message.startswith("EDITING MODE"):
+                    self.root.after(5000, lambda: self.update_status_bar())
+            elif self.editing_mode and self.has_unsaved_changes:
+                self.status_bar.config(text="EDITING MODE - PROMPT NEEDS TO BE SAVED", font=('TkDefaultFont', 9, 'bold'))
+            elif self.editing_mode:
+                self.status_bar.config(text="EDITING MODE - Selection locked", font=('TkDefaultFont', 9, 'normal'))
+            else:
+                self.status_bar.config(text="Ready", font=('TkDefaultFont', 9, 'normal'))
             
     def sync_scroll(self, scrollbar: ttk.Scrollbar, line_numbers: tk.Text, *args: str) -> None:
         """Synchronize scrolling between a text widget and its line numbers."""
@@ -610,7 +621,7 @@ class PromptMiniApp:
                         row['id'],
                         self.format_datetime(row['Created']),
                         self.format_datetime(row['Modified']),
-                        (row['Purpose'] or '')[:50] + "...",
+                        (row['Purpose'] or '')[:50] + ("..." if len(row['Purpose'] or '') > 50 else ""),
                         tags_display
                     ))
         finally:
@@ -630,6 +641,13 @@ class PromptMiniApp:
             
     def on_tree_select(self, event: Optional[tk.Event]) -> None:
         """Handle selection changes in the results treeview."""
+        # Don't change selection if in editing mode at all
+        if self.editing_mode:
+            # Restore the previous selection to the current item being edited
+            if self.current_item:
+                self._select_item_in_tree(self.current_item)
+            return
+            
         selection = self.tree.selection()
         self.selected_items = [self.tree.item(item)['values'][0] for item in selection]
         
@@ -643,9 +661,9 @@ class PromptMiniApp:
         self.update_action_buttons()
 
     def on_tree_double_click(self, event: tk.Event) -> None:
-        """Handle double-click on a tree item to enter editing mode."""
+        """Handle double-click on a tree item to open in new window."""
         if self.current_item:
-            self.change_item()
+            self.change_item_in_window()
             
     def on_tree_motion(self, event: tk.Event) -> None:
         """Show tooltips for truncated text in the treeview."""
@@ -914,6 +932,11 @@ class PromptMiniApp:
         if self.current_item and not self.editing_mode:
             self.enter_editing_mode()
             
+    def change_item_in_window(self) -> None:
+        """Open the selected prompt for editing in a new window."""
+        if self.current_item:
+            self.open_prompt_window('change', self.current_item)
+            
     def delete_items(self) -> None:
         """Delete one or more selected prompts."""
         if not self.selected_items: return
@@ -945,7 +968,7 @@ class PromptMiniApp:
     def update_action_buttons(self) -> None:
         """Centralized state machine for managing action buttons."""
         # Hide all buttons first
-        for btn in [self.new_btn, self.duplicate_btn, self.change_btn, self.delete_btn, self.save_btn, self.cancel_btn]:
+        for btn in [self.new_btn, self.duplicate_btn, self.change_btn, self.in_window_btn, self.delete_btn, self.save_btn, self.cancel_btn]:
             btn.pack_forget()
 
         if self.editing_mode:
@@ -958,11 +981,13 @@ class PromptMiniApp:
             
             num_selected = len(self.selected_items)
             
-            # Duplicate and Change are only for single selections
+            # Duplicate, Change, and in Window are only for single selections
             self.duplicate_btn.config(state='normal' if num_selected == 1 else 'disabled')
             self.change_btn.config(state='normal' if num_selected == 1 else 'disabled')
+            self.in_window_btn.config(state='normal' if num_selected == 1 else 'disabled')
             self.duplicate_btn.pack(side=tk.LEFT, padx=5)
             self.change_btn.pack(side=tk.LEFT, padx=5)
+            self.in_window_btn.pack(side=tk.LEFT, padx=5)
             
             # Delete button state
             self.delete_btn.config(state='normal' if num_selected > 0 else 'disabled')
@@ -1001,6 +1026,11 @@ class PromptMiniApp:
     def cancel_edits(self) -> None:
         """Cancel in-place editing and restore original content."""
         if self.editing_mode:
+            if self.has_unsaved_changes:
+                result = messagebox.askyesno("Unsaved Changes", 
+                    "You have unsaved changes. Are you sure you want to cancel?")
+                if not result:
+                    return
             self.exit_editing_mode()
             self.update_item_display(force_refresh=True)
 
@@ -1013,8 +1043,22 @@ class PromptMiniApp:
                 row = conn.execute('SELECT * FROM prompts WHERE id = ?', (self.current_item,)).fetchone()
                 if not row: return
 
+            # Store original data for comparison
+            self.original_data = {
+                'Purpose': row['Purpose'] or "",
+                'Prompt': row['Prompt'] or "",
+                'SessionURLs': row['SessionURLs'] or "",
+                'Tags': row['Tags'] or "",
+                'Note': row['Note'] or ""
+            }
+
             self.editing_mode = True
+            self.has_unsaved_changes = False
             self.update_action_buttons()
+            
+            # Lock the tree selection visually
+            self.tree.configure(selectmode='none')
+            self.update_status_bar("EDITING MODE - Selection locked")
 
             for widget in [self.prompt_display, self.urls_display, self.note_display]:
                 widget.config(state='normal')
@@ -1023,6 +1067,7 @@ class PromptMiniApp:
             self.purpose_entry = ttk.Entry(self.purpose_frame, font=('TkDefaultFont', 9, 'bold'))
             self.purpose_entry.insert(0, row['Purpose'] or "")
             self.purpose_entry.pack(side=tk.LEFT, padx=(5, 0), fill=tk.X, expand=True)
+            self.purpose_entry.bind('<KeyRelease>', self.on_edit_change)
 
             for widget in self.tags_display.winfo_children():
                 widget.destroy()
@@ -1034,21 +1079,120 @@ class PromptMiniApp:
                 except json.JSONDecodeError:
                     self.tags_entry.insert(0, row['Tags']) # fallback
             self.tags_entry.pack(fill=tk.X)
+            self.tags_entry.bind('<KeyRelease>', self.on_edit_change)
+            
+            # Add tag suggestions
+            self.add_tag_suggestions()
+            
+            # Bind change events to text widgets
+            for widget in [self.prompt_display, self.urls_display, self.note_display]:
+                widget.bind('<KeyRelease>', self.on_edit_change)
+                widget.bind('<Button-1>', self.on_edit_change)
             
         except Exception as e:
             self.logger.error(f"Error entering editing mode: {e}")
             messagebox.showerror("Edit Error", f"Failed to enter editing mode: {e}")
             self.exit_editing_mode() # Rollback UI changes
             
+    def on_edit_change(self, event=None) -> None:
+        """Track changes in editing mode and update status bar."""
+        if not self.editing_mode or not self.original_data:
+            return
+            
+        # Check if any field has changed
+        current_data = {
+            'Purpose': self.purpose_entry.get() if hasattr(self, 'purpose_entry') else "",
+            'Prompt': self.prompt_display.get(1.0, tk.END).rstrip('\n'),
+            'SessionURLs': self.urls_display.get(1.0, tk.END).rstrip('\n'),
+            'Tags': self.tags_entry.get() if hasattr(self, 'tags_entry') else "",
+            'Note': self.note_display.get(1.0, tk.END).rstrip('\n')
+        }
+        
+        has_changes = any(current_data[key] != self.original_data[key] for key in current_data)
+        
+        if has_changes != self.has_unsaved_changes:
+            self.has_unsaved_changes = has_changes
+            self.update_status_bar()
+    
+    def add_tag_suggestions(self) -> None:
+        """Add tag suggestion buttons in editing mode."""
+        if not self.editing_mode or not hasattr(self, 'tags_entry'):
+            return
+            
+        try:
+            with self.get_db_connection() as conn:
+                cursor = conn.execute('''
+                    SELECT Tags FROM prompts 
+                    WHERE Tags IS NOT NULL AND Tags != ""
+                    ORDER BY Modified DESC LIMIT 50
+                ''')
+                
+                all_tags = set()
+                for row in cursor.fetchall():
+                    tags_str = row['Tags']
+                    try:
+                        if tags_str.strip().startswith('['):
+                            tags = json.loads(tags_str)
+                        else:
+                            tags = [t.strip() for t in tags_str.split(',')]
+                        all_tags.update(t for t in tags if t.strip())
+                    except (json.JSONDecodeError, AttributeError):
+                        continue
+                
+                # Create suggestion frame
+                if hasattr(self, 'tag_suggestions_frame'):
+                    self.tag_suggestions_frame.destroy()
+                    
+                self.tag_suggestions_frame = ttk.Frame(self.tags_display)
+                self.tag_suggestions_frame.pack(fill=tk.X, pady=(5, 0))
+                
+                ttk.Label(self.tag_suggestions_frame, text="Suggestions:", font=('TkDefaultFont', 8)).pack(side=tk.LEFT)
+                
+                # Add top 10 most common tags as buttons
+                for tag in sorted(all_tags)[:10]:
+                    btn = ttk.Button(
+                        self.tag_suggestions_frame, 
+                        text=tag, 
+                        command=lambda t=tag: self.add_tag_to_entry(t)
+                    )
+                    btn.pack(side=tk.LEFT, padx=2)
+                    
+        except Exception as e:
+            self.logger.error(f"Error adding tag suggestions: {e}")
+    
+    def add_tag_to_entry(self, tag: str) -> None:
+        """Add a tag to the tags entry field."""
+        if not hasattr(self, 'tags_entry'):
+            return
+            
+        current_tags = self.tags_entry.get().strip()
+        if current_tags:
+            if tag not in current_tags.split(', '):
+                self.tags_entry.delete(0, tk.END)
+                self.tags_entry.insert(0, f"{current_tags}, {tag}")
+        else:
+            self.tags_entry.insert(0, tag)
+        self.on_edit_change()
+
     def exit_editing_mode(self) -> None:
         """Exit editing mode and restore the view-only UI."""
         if not self.editing_mode: return
             
         self.editing_mode = False
+        self.has_unsaved_changes = False
+        self.original_data = None
+        
+        # Unlock the tree selection
+        self.tree.configure(selectmode='extended')
+        
         self.update_action_buttons()
+        self.update_status_bar()
         
         for widget in [self.prompt_display, self.urls_display, self.note_display]:
             widget.config(state='disabled')
+            # Unbind change events
+            widget.unbind('<KeyRelease>')
+            widget.unbind('<Button-1>')
 
         if hasattr(self, 'purpose_entry'):
             self.purpose_entry.destroy()
@@ -1058,6 +1202,10 @@ class PromptMiniApp:
         if hasattr(self, 'tags_entry'):
             self.tags_entry.destroy()
             delattr(self, 'tags_entry')
+            
+        if hasattr(self, 'tag_suggestions_frame'):
+            self.tag_suggestions_frame.destroy()
+            delattr(self, 'tag_suggestions_frame')
 
     def open_prompt_window(self, mode: str, item_id: Optional[int] = None) -> None:
         """Open a separate window for creating or editing a prompt."""
